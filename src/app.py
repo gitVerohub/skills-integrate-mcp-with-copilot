@@ -5,14 +5,23 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import hashlib
 import os
 from pathlib import Path
+import secrets
+from typing import Optional
+from time import time as current_time
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+teacher_auth = HTTPBasic(auto_error=False)
+TEACHER_SESSION_COOKIE = "teacher_session"
+TEACHER_SESSION_LIFETIME_SECONDS = 3600
+teacher_sessions = {}
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
@@ -88,7 +97,90 @@ def get_activities():
     return activities
 
 
-@app.post("/activities/{activity_name}/signup")
+def authenticate_teacher(
+    credentials: Optional[HTTPBasicCredentials],
+) -> None:
+    """Validate teacher credentials configured outside the repository."""
+    username = os.environ.get("TEACHER_USERNAME")
+    password = os.environ.get("TEACHER_PASSWORD")
+    if not username or not password:
+        raise HTTPException(
+            status_code=503,
+            detail="Teacher authentication is not configured",
+        )
+
+    provided_username = credentials.username if credentials else ""
+    provided_password = credentials.password if credentials else ""
+    username_matches = secrets.compare_digest(
+        provided_username.encode("utf-8"), username.encode("utf-8")
+    )
+    password_matches = secrets.compare_digest(
+        provided_password.encode("utf-8"), password.encode("utf-8")
+    )
+    if not username_matches or not password_matches:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid teacher credentials",
+            headers={"WWW-Authenticate": 'Basic realm="teacher"'},
+        )
+
+
+@app.post("/auth/login")
+def login(
+    response: Response,
+    credentials: Optional[HTTPBasicCredentials] = Depends(teacher_auth),
+):
+    authenticate_teacher(credentials)
+
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    now = current_time()
+    for existing_token, expires_at in list(teacher_sessions.items()):
+        if expires_at <= now:
+            del teacher_sessions[existing_token]
+    teacher_sessions[token_hash] = now + TEACHER_SESSION_LIFETIME_SECONDS
+
+    response.set_cookie(
+        key=TEACHER_SESSION_COOKIE,
+        value=token,
+        max_age=TEACHER_SESSION_LIFETIME_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return {
+        "message": "Teacher login successful",
+        "expires_in": TEACHER_SESSION_LIFETIME_SECONDS,
+    }
+
+
+def require_teacher(
+    session_token: Optional[str] = Cookie(
+        default=None,
+        alias=TEACHER_SESSION_COOKIE,
+    ),
+) -> None:
+    """Require a valid, unexpired teacher session."""
+    token_hash = (
+        hashlib.sha256(session_token.encode("ascii")).hexdigest()
+        if session_token
+        else None
+    )
+    expires_at = teacher_sessions.get(token_hash) if token_hash else None
+    if expires_at is None or expires_at <= current_time():
+        if token_hash:
+            teacher_sessions.pop(token_hash, None)
+        raise HTTPException(
+            status_code=401,
+            detail="Teacher authentication required or expired",
+        )
+
+
+@app.post(
+    "/activities/{activity_name}/signup",
+    dependencies=[Depends(require_teacher)],
+)
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
     # Validate activity exists
@@ -110,7 +202,10 @@ def signup_for_activity(activity_name: str, email: str):
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
-@app.delete("/activities/{activity_name}/unregister")
+@app.delete(
+    "/activities/{activity_name}/unregister",
+    dependencies=[Depends(require_teacher)],
+)
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
     # Validate activity exists

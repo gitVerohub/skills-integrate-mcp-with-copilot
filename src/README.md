@@ -30,7 +30,19 @@ A super simple FastAPI application that allows students to view and sign up for 
 | Method | Endpoint                                                          | Description                                                         |
 | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------- |
 | GET    | `/activities`                                                     | Get all activities with their details and current participant count |
-| POST   | `/activities/{activity_name}/signup?email=student@mergington.edu` | Sign up for an activity                                             |
+| POST   | `/auth/login`                                                      | Log in as a teacher and start a session                              |
+| POST   | `/activities/{activity_name}/signup?email=student@mergington.edu` | Sign up for an activity (teacher session required)                  |
+| DELETE | `/activities/{activity_name}/unregister?email=student@mergington.edu` | Unregister a student (teacher session required)                  |
+
+Configure `TEACHER_USERNAME` and `TEACHER_PASSWORD` in the server's environment
+or secret manager; there are no default credentials. Send those credentials to
+`POST /auth/login` using HTTP Basic authentication. A successful login sets an
+`HttpOnly`, `Secure`, `SameSite=Strict` session cookie that expires after one
+hour. Signup and unregister requests must include that cookie. Invalid or
+expired sessions receive `401 Unauthorized`; if credentials are not configured,
+login returns `503 Service Unavailable`. Use HTTPS for login and subsequent
+requests. Viewing activities remains public. Sessions are held in memory and
+are invalidated when the server restarts.
 
 ## Data Model
 
